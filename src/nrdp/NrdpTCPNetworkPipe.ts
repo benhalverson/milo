@@ -212,7 +212,7 @@ export default function createTCPNetworkPipe(options: CreateTCPNetworkPipeOption
                         dnsChannel = dnsResult.channel;
                         innerResolve(sockAddr);
                     } catch (err) {
-                        reject(new Error("Failed to parse ip address"));
+                        reject(new Error("Failed to parse ip address " + err.toString()));
                     }
                 });
             }

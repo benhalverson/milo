@@ -8,7 +8,7 @@ import {
     NetworkPipe, RequestTimeouts, HTTP, HTTPMethod, HTTPHeadersEvent,
     HTTPTransferEncoding, ErrorCode, IDataBuffer
 } from "./types";
-import { assert, escapeData } from "./utils";
+import { assert } from "./utils";
 
 let nextId = 0;
 
@@ -185,8 +185,7 @@ export class Request {
         let parsedUrl: Url;
         if (typeof url === 'string') {
             parsedUrl = new Url(url);
-        }
-        else {
+        } else {
             parsedUrl = new Url(url.url);
         }
 
@@ -206,10 +205,12 @@ export class Request {
             }
             break;
         default:
-            if (!port)
+            if (!port) {
                 port = 80;
+            }
             break;
         }
+
 
         // Platform.trace("Request#send creating TCP pipe");
         const timeouts = opts.timeouts;
