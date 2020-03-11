@@ -1,56 +1,100 @@
 import Url from "url-parse";
-import { NetworkPipe } from "./types";
+import { NetworkPipe, CreateTCPNetworkPipeOptions } from "./types";
+import Platform from "./#{target}/Platform";
 import { assert } from "./utils";
 
-
-export interface ScheduleOptions {
+export interface ConnectionOptions {
     url: string;
     freshConnect?: boolean;
     forbidReuse?: boolean;
+    connectTimeout: number;
+    dnsTimeout: number;
 };
 
 export interface PendingConnection {
     readonly id: number;
 
     abort(): void;
-    onConnection(): Promise<NetworkPipe>;
+    then(func: (pipe: NetworkPipe) => Promise<any>): void;
 }
 
 class PendingConnectionImpl implements PendingConnection {
-    constructor(id: number) {
+    private pool: ConnectionPool;
+    private error?: string;
+    private pipe?: NetworkPipe;
+    private rejectFunction?: (reason: string) => void;
+    private resolveFunction?: (pipe: NetworkPipe) => void;
+
+    public hostname: string;
+    public port: number;
+
+    public dnsTimeout: number;
+    public connectTimeout: number;
+
+
+    constructor(pool: ConnectionPool, id: number, hostname: string,
+                port: number, dnsTimeout: number, connectTimeout: number) {
         this.id = id;
+        this.pool = pool;
+        this.hostname = hostname;
+        this.port = port;
+        this.dnsTimeout = dnsTimeout;
+        this.connectTimeout = connectTimeout;
     }
 
     readonly id: number;
 
-    reject?: (reason: string) => void;
-    resolve?: (pipe: NetworkPipe) => void;
-
     abort(): void {
-
-
+        if (this.error || this.pipe) {
+            throw new Error("Too late to abort pending connection");
+        }
+        this.pool.abort(this.id);
     }
-    onConnection(): Promise<NetworkPipe> {
-        assert(this.resolve);
-        assert(this.reject);
+    then(func: (pipe: NetworkPipe) => Promise<any>): Promise<any> {
+        assert(!this.resolve);
+        assert(!this.reject);
         return new Promise((resolve, reject) => {
+            if (this.error) {
+                reject(this.error);
+                return;
+            }
 
+            if (this.pipe) {
+                resolve(this.pipe);
+                return;
+            }
 
+            this.resolveFunction = resolve;
+            this.rejectFunction = reject;
         });
-        // this.resolve.then(
+    }
+
+    resolve(pipe: NetworkPipe): void {
+        assert(!this.pipe);
+        assert(!this.error);
+
+        this.pipe = pipe;
+        if (this.resolveFunction) {
+            this.resolveFunction(pipe);
+        }
+    }
+
+    reject(error: string): void {
+        assert(!this.pipe);
+        assert(!this.error);
+
+        this.error = error;
+        if (this.rejectFunction) {
+            this.rejectFunction(error);
+        }
     }
 };
 
-class ConnectionData {
-    busy: NetworkPipe[];
-    ready: NetworkPipe[];
-    pending: PendingConnection[];
-
-    constructor() {
-        this.busy = [];
-        this.ready = [];
-        this.pending = [];
-    }
+interface ConnectionData {
+    pipes: NetworkPipe[];
+    initializing: number;
+    pending: PendingConnectionImpl[];
+    ssl: boolean;
 };
 
 class ConnectionPool {
@@ -77,66 +121,179 @@ class ConnectionPool {
         this._maxPoolSize = value;
     }
 
-    // what to do for people who need to wait?, need an id
-    requestConnection(options: ScheduleOptions): Promise<NetworkPipe | PendingConnection> {
-        const url = new Url(options.url);
-
-        let port: number = 0;
-        if (url.port) {
-            port = parseInt(url.port);
-        }
-
-        // Platform.trace("Request#send port", port);
-        let ssl = false;
-        switch (url.protocol) {
-        case "https:":
-        case "wss:":
-            ssl = true;
-            if (!port) {
-                port = 443;
+    abort(id: number): void {
+        for (let [, value] of this._connections) {
+            if (value.pending) {
+                for (let i = 0; i < value.pending.length; ++i) {
+                    if (value.pending[i].id === id) {
+                        value.pending.splice(i, 1);
+                        return;
+                    }
+                }
             }
-            break;
-        default:
-            if (!port)
-                port = 80;
-            break;
-        }
-        if ((port == 80 && ssl) || (port == 443 && !ssl)) {
-            // this is completely asinine but it's simple enough to allow
-            options.freshConnect = true;
-            options.forbidReuse = true;
         }
 
-        const hostPort = `${url.host}:${port}`;
-
-        if (options.freshConnect) {
-            // if (this._maxPoolSize > 0 && this._connectionCount >= this._maxPoolSize) {
-            //     const pending = new PendingConnectionImpl(++this._id);
-            //     if (this._id == Number.MAX_SAFE_INTEGER) {
-            //         this._id = 0;
-            //     }
-
-            //     if (!this._pendingFreshConnects) {
-            //         this._pendingFreshConnects = [];
-            //     }
-            //     this._pendingFreshConnects.push(pending);
-            //     const prom = new Promise<PendingConnection>((resolve, reject) {
-            //         pending.resolve = resolve;
-            //         pending.reject = reject;
-            //     });
-            // }
+        if (this._pendingFreshConnects) {
+            for (let i = 0; i < this._pendingFreshConnects.length; ++i) {
+                if (this._pendingFreshConnects[i].id === id) {
+                    if (this._pendingFreshConnects.length === 1) {
+                        this._pendingFreshConnects = undefined;
+                    } else {
+                        this._pendingFreshConnects.splice(i, 1);
+                    }
+                    return;
+                }
+            }
         }
+        throw new Error("Can't find request to abort with id " + id);
+    }
 
+    finish(pipe: NetworkPipe): void {
+        if (pipe.forbidReuse) {
+            if (!pipe.closed) {
+                pipe.close();
+            }
+            return;
+        }
+        const hostPort = `${pipe.hostname}:${pipe.port}`;
         let data = this._connections.get(hostPort);
-        if (!data) {
-            data = new ConnectionData;
+        if (!data) { // can this happen?
+            data = { pipes: [], initializing: 0, pending: [], ssl: pipe.ssl };
             this._connections.set(hostPort, data);
         }
-        // if (data.ready
-        // }
+
+        if (pipe.closed) {
+            const idx = data.pipes.indexOf(pipe);
+            assert(idx != -1);
+            data.pipes.splice(idx, 1);
+        } else {
+            pipe.idle = true;
+            data.pipes.push(pipe);
+        }
+        this.processConnection(data);
+    }
+
+    // what to do for people who need to wait?, need an id
+    requestConnection(options: ConnectionOptions): Promise<PendingConnection> {
         return new Promise((resolve, reject) => {
+            const url = new Url(options.url);
 
+            let port: number = 0;
+            if (url.port) {
+                port = parseInt(url.port);
+            }
 
+            // Platform.trace("Request#send port", port);
+            let ssl = false;
+            switch (url.protocol) {
+            case "https:":
+            case "wss:":
+                ssl = true;
+                if (!port) {
+                    port = 443;
+                }
+                break;
+            default:
+                if (!port)
+                    port = 80;
+                break;
+            }
+
+            const hostname = url.hostname;
+            if (!hostname || port < 1 || port > 65535) {
+                reject(new Error("Invalid url " + options.url));
+                return;
+            }
+
+            const hostPort = `${hostname}:${port}`;
+            let data = this._connections.get(hostPort);
+
+            if ((port == 80 && ssl) || (port == 443 && !ssl) || (data && data.ssl != ssl)) {
+                // this is completely asinine but it's simple enough to allow
+                options.freshConnect = true;
+                options.forbidReuse = true;
+            }
+
+            const pending = new PendingConnectionImpl(this, ++this._id, hostname, port,
+                                                      options.dnsTimeout, options.connectTimeout);
+            if (this._id == Number.MAX_SAFE_INTEGER) {
+                this._id = 0;
+            }
+
+            if (options.freshConnect) {
+                // if (this._maxPoolSize > 0 && this._connectionCount >= this._maxPoolSize) {
+                //     const pending = new PendingConnectionImpl(++this._id);
+                //     if (this._id == Number.MAX_SAFE_INTEGER) {
+                //         this._id = 0;
+                //     }
+
+                //     if (!this._pendingFreshConnects) {
+                //         this._pendingFreshConnects = [];
+                //     }
+                //     this._pendingFreshConnects.push(pending);
+                //     const prom = new Promise<PendingConnection>((resolve, reject) {
+                //         pending.resolve = resolve;
+                //         pending.reject = reject;
+                //     });
+                // }
+            }
+
+            if (!data) {
+                data = { pipes: [], initializing: 0, pending: [], ssl: ssl };
+                this._connections.set(hostPort, data);
+            }
+
+            resolve(pending);
+            data.pending.push(pending);
+            this.processConnection(data);
         });
+    }
+
+    // called when there's something to do and a pending
+    private processConnection(data: ConnectionData): void {
+        if (!data.pending.length)
+            return;
+
+        for (let i = 0; i < data.pipes.length; ++i) {
+            assert(!data.pipes[i].closed, "This shouldn't be closed");
+            if (data.pipes[i].idle) {
+                data.pipes[i].idle = false;
+                const pending = data.pending.shift();
+                assert(pending);
+                pending.resolve(data.pipes[i]);
+                return;
+            }
+        }
+
+        if (data.pipes.length + data.initializing < this._maxConnectionsPerHost) {
+            const pending = data.pending.shift();
+            assert(pending);
+            const tcpOpts = {
+                hostname: pending.hostname,
+                port: pending.port,
+                dnsTimeout: pending.dnsTimeout,
+                connectTimeout: pending.connectTimeout,
+                ipVersion: 4 // gotta do happy eyeballs and send off multiple tcp network pipe things
+            } as CreateTCPNetworkPipeOptions;
+
+            ++data.initializing;
+            Platform.createTCPNetworkPipe(tcpOpts).then((pipe: NetworkPipe) => {
+                if (data.ssl) {
+                    return Platform.createSSLNetworkPipe({ pipe: pipe });
+                } else {
+                    return pipe;
+                }
+            }).then((pipe: NetworkPipe) => {
+                pipe.idle = false;
+                assert(data);
+                --data.initializing;
+                data.pipes.push(pipe);
+                pending.resolve(pipe);
+            }).catch((error: Error) => {
+                --data.initializing;
+                pending.reject(error.toString()); // should I reject with the error itself?
+                this.processConnection(data);
+            });
+        }
     }
 }

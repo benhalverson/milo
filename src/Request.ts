@@ -89,10 +89,11 @@ export class RequestResponse {
     serverIp?: string;
     sslSessionResumed?: boolean;
     sslHandshakeTime?: number;
-    sslVersion?: string | undefined;
+    sslVersion?: string;
     dns?: string;
     dnsChannel?: string;
     socket?: number;
+    socketReused?: boolean;
     data?: string | ArrayBuffer | Uint8Array | IDataBuffer;
     size?: number;
     urls?: string[];
@@ -215,7 +216,7 @@ export class Request {
         // Platform.trace("Request#send creating TCP pipe");
         const timeouts = opts.timeouts;
         const tcpOpts = {
-            host: parsedUrl.hostname,
+            hostname: parsedUrl.hostname,
             port: port,
             dnsTimeout: timeouts && timeouts.dnsTimeout,
             connectTimeout: timeouts && timeouts.connectTimeout,
@@ -269,7 +270,7 @@ export class Request {
         assert(this.requestData.timeouts);
         const timeouts = this.requestData.timeouts;
         const tcpOpts = {
-            host: this.url.hostname,
+            hostname: this.url.hostname,
             port: port,
             dnsTimeout: timeouts && timeouts.dnsTimeout,
             connectTimeout: timeouts && timeouts.connectTimeout,
@@ -395,6 +396,8 @@ export class Request {
         case RequestState.Error:
             break;
         case RequestState.Finished:
+            assert(this.networkPipe);
+            Platform.log("got to finished", this.networkPipe.closed);
             let responseDataBuffer: IDataBuffer;
             if (this.responseDataArray) {
                 // Platform.trace("GOT HERE 1", this.responseDataArray);

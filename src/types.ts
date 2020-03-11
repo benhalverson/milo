@@ -198,7 +198,7 @@ export interface RequestTimeouts {
 };
 
 export interface CreateTCPNetworkPipeOptions {
-    host: string; // could be an ip literal
+    hostname: string; // could be an ip literal
     port: number;
     connectTimeout: number;
     dnsTimeout: number;
@@ -231,6 +231,12 @@ export interface NetworkPipe {
 
     close(): void;
 
+    idle: boolean;
+    forbidReuse: boolean;
+    hostname: string;
+    port: number;
+
+    readonly ssl: boolean;
     readonly closed: boolean;
 
     readonly firstByteWritten?: number;
