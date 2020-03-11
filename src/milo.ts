@@ -1,9 +1,9 @@
 import { Request, RequestData, RequestResponse } from "./Request";
 import Platform from "./#{target}/Platform";
-import { IDataBuffer } from "./types";
+import { IDataBuffer, IUnorderedMap } from "./types";
 import WS, { WSState } from './ws';
 
-const requests = new Map();
+const requests = new UnorderedMap();
 
 export {
     WS,

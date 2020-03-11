@@ -1,5 +1,5 @@
 import Url from "url-parse";
-import { NetworkPipe, CreateTCPNetworkPipeOptions } from "./types";
+import { NetworkPipe, CreateTCPNetworkPipeOptions, IUnorderedMap } from "./types";
 import Platform from "./#{target}/Platform";
 import { assert } from "./utils";
 
@@ -15,14 +15,14 @@ export interface PendingConnection {
     readonly id: number;
 
     abort(): void;
-    then(func: (pipe: NetworkPipe) => void): Promise<any>;
+    onNetworkPipe(): Promise<NetworkPipe>;
 }
 
 class PendingConnectionImpl implements PendingConnection {
     private pool: ConnectionPool;
-    private error?: string;
+    private error?: Error;
     private pipe?: NetworkPipe;
-    private rejectFunction?: (reason: string) => void;
+    private rejectFunction?: (reason: Error) => void;
     private resolveFunction?: (pipe: NetworkPipe) => void;
 
     public hostname: string;
@@ -30,7 +30,6 @@ class PendingConnectionImpl implements PendingConnection {
 
     public dnsTimeout: number;
     public connectTimeout: number;
-
 
     constructor(pool: ConnectionPool, id: number, hostname: string,
                 port: number, dnsTimeout: number, connectTimeout: number) {
@@ -50,7 +49,7 @@ class PendingConnectionImpl implements PendingConnection {
         }
         this.pool.abort(this.id);
     }
-    then(func: (pipe: NetworkPipe) => Promise<any>): Promise<any> {
+    onNetworkPipe(): Promise<NetworkPipe> {
         assert(!this.resolve);
         assert(!this.reject);
         return new Promise((resolve, reject) => {
@@ -79,7 +78,7 @@ class PendingConnectionImpl implements PendingConnection {
         }
     }
 
-    reject(error: string): void {
+    reject(error: Error): void {
         assert(!this.pipe);
         assert(!this.error);
 
@@ -101,16 +100,14 @@ export class ConnectionPool {
     private _id: number;
     private _maxPoolSize: number;
     private _maxConnectionsPerHost: number;
-    private _hosts: Map<string, HostData>;
+    private _hosts: IUnorderedMap;
     private _pendingFreshConnects?: PendingConnection[];
-    private _connectionCount: number;
 
     constructor() {
         this._id = 0;
         this._maxPoolSize = 0;
         this._maxConnectionsPerHost = 3;
-        this._connectionCount = 0;
-        this._hosts = new Map();
+        this._hosts = new UnorderedMap();
     }
 
     get maxPoolSize() {
@@ -122,7 +119,9 @@ export class ConnectionPool {
     }
 
     abort(id: number): void {
-        for (let [, value] of this._hosts) {
+        const values = this._hosts.values() as HostData[];
+        for (let idx = 0; idx < values.length; ++idx) {
+            const value = values[idx];
             if (value.pending) {
                 for (let i = 0; i < value.pending.length; ++i) {
                     if (value.pending[i].id === id) {
@@ -289,7 +288,7 @@ export class ConnectionPool {
                 pending.resolve(pipe);
             }).catch((error: Error) => {
                 --data.initializing;
-                pending.reject(error.toString()); // should I reject with the error itself?
+                pending.reject(error);
                 this.processHost(data);
             });
         }

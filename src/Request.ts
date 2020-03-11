@@ -265,18 +265,19 @@ export class Request {
         } as ConnectionOptions;
 
         ConnectionPool.requestConnection(connectionOpts).then((conn: PendingConnection) => {
-            return conn.then((pipe: NetworkPipe) => {
-                // Platform.trace("GOT OUR PIPE NOW");
-                this.networkPipe = pipe;
-                if (pipe.dnsTime) {
-                    this.requestResponse.dnsTime = pipe.dnsTime;
-                }
-                if (pipe.connectTime) {
-                    this.requestResponse.connectTime = pipe.connectTime;
-                }
+            // conn is abortable
+            return conn.onNetworkPipe();
+        }).then((pipe: NetworkPipe) => {
+            // Platform.trace("GOT OUR PIPE NOW");
+            this.networkPipe = pipe;
+            if (pipe.dnsTime) {
+                this.requestResponse.dnsTime = pipe.dnsTime;
+            }
+            if (pipe.connectTime) {
+                this.requestResponse.connectTime = pipe.connectTime;
+            }
 
-                this._transition(RequestState.Connected);
-            });
+            this._transition(RequestState.Connected);
         }).catch((err: Error) => {
             // Platform.trace("Request#send#createTCPNetworkPipe error", err);
             this._onError(-1, err.toString());
