@@ -4,7 +4,7 @@ import Platform from "./#{target}/Platform";
 import { assert } from "./utils";
 
 export interface ConnectionOptions {
-    url: string;
+    url: Url;
     freshConnect?: boolean;
     forbidReuse?: boolean;
     connectTimeout: number;
@@ -15,7 +15,7 @@ export interface PendingConnection {
     readonly id: number;
 
     abort(): void;
-    then(func: (pipe: NetworkPipe) => Promise<any>): void;
+    then(func: (pipe: NetworkPipe) => void): Promise<any>;
 }
 
 class PendingConnectionImpl implements PendingConnection {
@@ -90,18 +90,18 @@ class PendingConnectionImpl implements PendingConnection {
     }
 };
 
-interface ConnectionData {
+interface HostData {
     pipes: NetworkPipe[];
     initializing: number;
     pending: PendingConnectionImpl[];
     ssl: boolean;
 };
 
-class ConnectionPool {
+export class ConnectionPool {
     private _id: number;
     private _maxPoolSize: number;
     private _maxConnectionsPerHost: number;
-    private _connections: Map<string, ConnectionData>;
+    private _hosts: Map<string, HostData>;
     private _pendingFreshConnects?: PendingConnection[];
     private _connectionCount: number;
 
@@ -110,7 +110,7 @@ class ConnectionPool {
         this._maxPoolSize = 0;
         this._maxConnectionsPerHost = 3;
         this._connectionCount = 0;
-        this._connections = new Map();
+        this._hosts = new Map();
     }
 
     get maxPoolSize() {
@@ -122,7 +122,7 @@ class ConnectionPool {
     }
 
     abort(id: number): void {
-        for (let [, value] of this._connections) {
+        for (let [, value] of this._hosts) {
             if (value.pending) {
                 for (let i = 0; i < value.pending.length; ++i) {
                     if (value.pending[i].id === id) {
@@ -156,10 +156,10 @@ class ConnectionPool {
             return;
         }
         const hostPort = `${pipe.hostname}:${pipe.port}`;
-        let data = this._connections.get(hostPort);
+        let data = this._hosts.get(hostPort);
         if (!data) { // can this happen?
             data = { pipes: [], initializing: 0, pending: [], ssl: pipe.ssl };
-            this._connections.set(hostPort, data);
+            this._hosts.set(hostPort, data);
         }
 
         if (pipe.closed) {
@@ -170,22 +170,20 @@ class ConnectionPool {
             pipe.idle = true;
             data.pipes.push(pipe);
         }
-        this.processConnection(data);
+        this.processHost(data);
     }
 
     // what to do for people who need to wait?, need an id
     requestConnection(options: ConnectionOptions): Promise<PendingConnection> {
         return new Promise((resolve, reject) => {
-            const url = new Url(options.url);
-
             let port: number = 0;
-            if (url.port) {
-                port = parseInt(url.port);
+            if (options.url.port) {
+                port = parseInt(options.url.port);
             }
 
             // Platform.trace("Request#send port", port);
             let ssl = false;
-            switch (url.protocol) {
+            switch (options.url.protocol) {
             case "https:":
             case "wss:":
                 ssl = true;
@@ -199,14 +197,14 @@ class ConnectionPool {
                 break;
             }
 
-            const hostname = url.hostname;
+            const hostname = options.url.hostname;
             if (!hostname || port < 1 || port > 65535) {
                 reject(new Error("Invalid url " + options.url));
                 return;
             }
 
             const hostPort = `${hostname}:${port}`;
-            let data = this._connections.get(hostPort);
+            let data = this._hosts.get(hostPort);
 
             if ((port == 80 && ssl) || (port == 443 && !ssl) || (data && data.ssl != ssl)) {
                 // this is completely asinine but it's simple enough to allow
@@ -240,17 +238,17 @@ class ConnectionPool {
 
             if (!data) {
                 data = { pipes: [], initializing: 0, pending: [], ssl: ssl };
-                this._connections.set(hostPort, data);
+                this._hosts.set(hostPort, data);
             }
 
             resolve(pending);
             data.pending.push(pending);
-            this.processConnection(data);
+            this.processHost(data);
         });
     }
 
     // called when there's something to do and a pending
-    private processConnection(data: ConnectionData): void {
+    private processHost(data: HostData): void {
         if (!data.pending.length)
             return;
 
@@ -292,8 +290,10 @@ class ConnectionPool {
             }).catch((error: Error) => {
                 --data.initializing;
                 pending.reject(error.toString()); // should I reject with the error itself?
-                this.processConnection(data);
+                this.processHost(data);
             });
         }
     }
 }
+
+export default new ConnectionPool;

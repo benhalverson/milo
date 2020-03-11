@@ -2,6 +2,7 @@ import Url from "url-parse";
 import { HTTP1 } from "./HTTP1/HTTP1";
 import Platform from "./#{target}/Platform";
 import DataBuffer from "./#{target}/DataBuffer";
+import ConnectionPool, { ConnectionOptions, PendingConnection } from "./ConnectionPool";
 
 import {
     CreateTCPNetworkPipeOptions, DnsResult, IpConnectivityMode,
@@ -251,50 +252,31 @@ export class Request {
             port = parseInt(this.url.port);
         }
 
-        // Platform.trace("Request#send port", port);
-        let ssl = false;
-        switch (this.url.protocol) {
-        case "https:":
-        case "wss:":
-            ssl = true;
-            if (!port) {
-                port = 443;
-            }
-            break;
-        default:
-            if (!port)
-                port = 80;
-            break;
-        }
         // Platform.trace("Request#send creating TCP pipe");
         assert(this.requestData.timeouts);
         const timeouts = this.requestData.timeouts;
-        const tcpOpts = {
-            hostname: this.url.hostname,
-            port: port,
+
+        const connectionOpts = {
+            url: this.url,
             dnsTimeout: timeouts && timeouts.dnsTimeout,
             connectTimeout: timeouts && timeouts.connectTimeout,
-            ipVersion: 4 // gotta do happy eyeballs and send off multiple tcp network pipe things
-        } as CreateTCPNetworkPipeOptions;
-        Platform.createTCPNetworkPipe(tcpOpts).then((pipe: NetworkPipe) => {
-            if (pipe.dnsTime) {
-                this.requestResponse.dnsTime = pipe.dnsTime;
-            }
-            if (pipe.connectTime) {
-                this.requestResponse.connectTime = pipe.connectTime;
-            }
+            freshConnect: this.requestData.freshConnect,
+            forbidReuse: this.requestData.forbidReuse
+        } as ConnectionOptions;
 
-            // Platform.trace("Request#send#createTCPNetworkPipe pipe");
-            if (ssl) {
-                return Platform.createSSLNetworkPipe({ pipe: pipe });
-            } else {
-                return pipe;
-            }
-        }).then((pipe: NetworkPipe) => {
-            // Platform.trace("GOT OUR PIPE NOW");
-            this.networkPipe = pipe;
+        ConnectionPool.requestConnection(connectionOpts).then((conn: PendingConnection) => {
+            return conn.then((pipe: NetworkPipe) => {
+                // Platform.trace("GOT OUR PIPE NOW");
+                this.networkPipe = pipe;
+                if (pipe.dnsTime) {
+                    this.requestResponse.dnsTime = pipe.dnsTime;
+                }
+                if (pipe.connectTime) {
+                    this.requestResponse.connectTime = pipe.connectTime;
+                }
 
-            this._transition(RequestState.Connected);
+                this._transition(RequestState.Connected);
+            });
         }).catch((err: Error) => {
             // Platform.trace("Request#send#createTCPNetworkPipe error", err);
             this._onError(-1, err.toString());
