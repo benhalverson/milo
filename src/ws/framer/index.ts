@@ -1,145 +1,31 @@
-import Platform from '../#{target}/Platform';
-import DataBuffer from '../#{target}/DataBuffer'
+import Platform from '../../#{target}/Platform';
+import DataBuffer from '../../#{target}/DataBuffer'
+
+import {
+    FramerState,
+    WSState,
+    WSCallback,
+} from './types';
 
 import {
     BufferPool,
     parse64BigInt,
-} from './buffer';
+} from '../buffer';
 
 import {
     NetworkPipe,
     IDataBuffer,
-} from '../types';
+} from '../../types';
 
 import {
     assert
-} from '../utils';
+} from '../../utils';
 
-import maskFn from './mask';
+import maskFn from '../mask';
 
 import {
     Opcodes
-} from './types';
-
-
-// @ts-ignore
-import {
-    htons,
-    ntohs,
-// @ts-ignore
-} from 'network-byte-order';
-
-type WSCallback = (buffer: IDataBuffer, state: WSState) => void;
-
-enum State {
-    Waiting = 1,
-    ParsingHeader,
-    WaitingForCompleteHeader,
-    ParsingBody,
-};
-
-// TODO: Probably should do some sort of object pool.
-const MAX_HEADER_SIZE = 8;
-const headerPool = new BufferPool(MAX_HEADER_SIZE);
-
-// TODO: Rotate pools.
-const maskNumber = 0xAABBAABB;
-const maskBuf = new Uint8Array(4);
-const maskView = new DataView(maskBuf.buffer);
-maskView.setUint32(0, maskNumber, true);
-
-let payloadHeadersReceived = 0;
-
-// TODO: Fulfill the RFCs requirement for masks.
-// TODO: ws module may not allow us to use as simple one like this.
-function generateMask(): Uint8Array {
-    return maskBuf;
-}
-
-export function constructFrameHeader(
-    buf: IDataBuffer,
-    isFinished: boolean,
-    opCode: number,
-    payloadLength: number,
-    mask?: Uint8Array,
-): number {
-    let ptr = 0;
-
-    let firstByte = 0x0;
-    if (isFinished) {
-        firstByte |= (0x1) << 7;
-    }
-
-    firstByte |= (opCode & 0xF);
-    buf.setUInt8(ptr++, firstByte);
-
-    // payload encoding
-    let secondByte = 0;
-    if (mask !== undefined) {
-        secondByte = 0x1 << 7;
-    }
-
-    ptr++;
-    if (payloadLength <= 125) {
-        secondByte |= (payloadLength & 0x7F);
-    }
-    else if (payloadLength < 0xFFFF) {
-        secondByte |= (126 & 0x7F);
-        buf.setUInt16BE(ptr, payloadLength);
-        ptr += 2;
-    }
-    else {
-        // TODO: put an exception in WS Constructor if you attempt to make
-        // frames larger than 64KB
-        //
-        // TODO: Or should we allow it?  Maybe?
-        //
-        // NOTE: This should just never be an option.  It really is
-        // insanity wolf to make a packet this big that would throttle the
-        // whole ws pipeline.
-        throw new Error('Bad implementation, Prime');
-    }
-
-    buf.setUInt8(1, secondByte);
-
-    if (mask !== undefined) {
-        buf.set(ptr, mask);
-        ptr += 4;
-    }
-
-    return ptr;
-}
-
-export type WSState = {
-    isFinished: boolean;
-    rsv1: number;
-    rsv2: number;
-    rsv3: number;
-    opcode: number;
-    isMasked: boolean;
-    mask: Uint8Array;
-    payloadLength: number;
-    payload: IDataBuffer;
-    isControlFrame: boolean;
-    payloadPtr: number;
-    payloads?: IDataBuffer[];
-    state: State;
-};
-
-function createDefaultState(isControlFrame = false) {
-    // @ts-ignore
-    return {
-        isFinished: false,
-        opcode: 0,
-        isControlFrame,
-        isMasked: false,
-        mask: new Uint8Array(4),
-        payloadLength: 0,
-        payloadPtr: 0,
-        payloads: [],
-        state: State.Waiting,
-    } as WSState;
-}
+} from '../types';
 
 export default class WSFramer {
     private callbacks: WSCallback[];
@@ -251,6 +137,12 @@ export default class WSFramer {
             if (state.state === State.Waiting ||
                 state.state === State.WaitingForCompleteHeader) {
 
+                // First check to see if there is enough to parse
+                if (!this.isHeaderParsable(state, packet, offset, endIdx)) {
+                    return false;
+                }
+
+
                 // ITS GONNA DO IT.
                 if (state.state === State.Waiting &&
                     this.isControlFrame(packet, ptr)) {
@@ -329,113 +221,9 @@ export default class WSFramer {
         } while (ptr < endIdx);
     }
 
-    /*
-     * straight out of rfc:
-     * https://tools.ietf.org/html/rfc6455
-     *
-      0                   1                   2                   3
-      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-     +-+-+-+-+-------+-+-------------+-------------------------------+
-     |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
-     |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
-     |N|V|V|V|       |S|             |   (if payload len==126/127)   |
-     | |1|2|3|       |K|             |                               |
-     +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
-     |     Extended payload length continued, if payload len == 127  |
-     + - - - - - - - - - - - - - - - +-------------------------------+
-     |                               |Masking-key, if MASK set to 1  |
-     +-------------------------------+-------------------------------+
-     | Masking-key (continued)       |          Payload Data         |
-     +-------------------------------- - - - - - - - - - - - - - - - +
-     :                     Payload Data continued ...                :
-     + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
-     |                     Payload Data continued ...                |
-     +---------------------------------------------------------------+
-     */
+    private getByteBetween(state: WSState, packet: IDataBuffer, offset: number, endIdx: number): number {
 
-    private isHeaderParsable(packet: IDataBuffer, offset: number, endIdx: number): boolean {
-        const len = endIdx - offset;
-        if (len < 2) {
-            return false;
-        }
-
-        const byte1 = packet.getUInt8(offset);
-        const byte2 = packet.getUInt8(offset + 1);
-        const isMasked = (byte2 & 0x80) >>> 7 === 1;
-        const payloadLength =  (byte2 & 0x7F);
-
-        let size = 2;
-        if (payloadLength === 126) {
-            size += 2;
-        }
-        else if (payloadLength === 127) {
-            size += 8;
-        }
-
-        if (isMasked) {
-            size += 4;
-        }
-
-        return len >= size;
-    }
-
-    private parseHeader(state: WSState, packet: IDataBuffer, offset: number, endIdx: number): number | boolean {
-
-        if (!this.isHeaderParsable(packet, offset, endIdx)) {
-            return false;
-        }
-
-        let ptr = offset;
-        const byte1 = packet.getUInt8(ptr++);
-        state.isFinished = (byte1 & (0x80)) >>> 7 === 1;
-
-        state.rsv1 = (byte1 & 0x40) >> 6;
-        state.rsv2 = (byte1 & 0x20) >> 5;
-        state.rsv3 = (byte1 & 0x10) >> 4;
-
-        const opcode = byte1 & 0xF;
-
-        if (opcode != Opcodes.ContinuationFrame &&
-            opcode != Opcodes.BinaryFrame) {
-        }
-
-        if (opcode != Opcodes.ContinuationFrame) {
-            state.opcode = opcode;
-        }
-
-        const byte2 = packet.getUInt8(ptr++);
-
-        state.isMasked = (byte2 & 0x80) >>> 7 === 1;
-
-        state.payloadLength =  (byte2 & 0x7F);
-
-        if (state.payloadLength === 126) {
-            state.payloadLength = packet.getUInt16BE(ptr);
-            ptr += 2;
-        }
-
-        else if (state.payloadLength === 127) {
-            assert(packet.getUInt32BE(ptr) === 0, "Nope. As of now, we don't allow larger than this ever.  Why would you ever send this much data through a WS anyways?  What's wrong with you...");
-            state.payloadLength = packet.getUInt32BE(ptr + 4);
-
-            ptr += 8;
-        }
-
-        if (state.isMasked) {
-            state.mask = new Uint8Array(4);
-            const maskBuf = packet.subarray(ptr, 4);
-            state.mask[0] = maskBuf.getUInt8(0);
-            state.mask[1] = maskBuf.getUInt8(1);
-            state.mask[2] = maskBuf.getUInt8(2);
-            state.mask[3] = maskBuf.getUInt8(3);
-
-            ptr += 4;
-        }
-
-        state.payloadPtr = 0;
-        state.payload = new DataBuffer(state.payloadLength);
-
-        return ptr;
+        return 0;
     }
 
     private parseBody(
