@@ -10,6 +10,7 @@ export enum Opcodes {
 
 export type WSOptions = {
     maxFrameSize: number;
+    eventWrapper: boolean;
 };
 
 

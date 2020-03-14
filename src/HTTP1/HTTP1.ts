@@ -11,6 +11,7 @@ export class HTTP1 implements HTTP {
     private connection?: string;
     private headersFinished: boolean;
     private chunkyParser?: ChunkyParser;
+    private contentLength?: number;
     private requestSize?: number;
 
     public httpVersion: string;
@@ -25,13 +26,17 @@ export class HTTP1 implements HTTP {
         this.upgrade = false;
     }
 
+    private getPathName(hostName: string, query: string): string {
+        return `${hostName}${query}`;
+    }
+
     send(networkPipe: NetworkPipe, request: HTTPRequest): boolean {
         this.networkPipe = networkPipe;
         this.request = request;
         let str =
-            `${request.method} ${request.url.pathname || "/"} HTTP/1.1\r
-Host: ${request.url.hostname}\r
-`;
+            `${request.method} ${this.getPathName(request.url.pathname || "/", request.url.query as unknown as string)} HTTP/1.1\r
+Host: ${request.url.host}\r\n`;
+
         for (let key in Platform.standardHeaders) {
             if (!(key in request.requestHeaders)) {
                 str += `${key}: ${Platform.standardHeaders[key]}\r\n`;
@@ -59,6 +64,7 @@ Host: ${request.url.hostname}\r
         let scratch = Platform.scratch;
         this.networkPipe.ondata = () => {
             while (true) {
+
                 assert(this.networkPipe, "Must have network pipe");
 
                 const read = this.networkPipe.read(scratch, 0, scratch.byteLength);
@@ -76,14 +82,26 @@ Host: ${request.url.hostname}\r
                     if (rnrn != -1) {
                         this._parseHeaders(rnrn);
                         this.headersFinished = true;
-                        const remaining = this.headerBuffer.byteLength - (rnrn + 4);
-                        if (remaining) {
-                            this._processResponseData(this.headerBuffer, this.headerBuffer.byteLength - remaining, remaining);
+
+                        let remaining = this.headerBuffer.byteLength - (rnrn + 4);
+
+                        const hOffset = this.headerBuffer.byteLength - remaining;
+                        if (!this.chunkyParser && !this.contentLength) {
+                            this.networkPipe.unread(this.headerBuffer, hOffset, remaining);
+                            remaining = 0;
                         }
+
+                        if (remaining) {
+                            this._processResponseData(this.headerBuffer, hOffset, remaining);
+                        }
+
                         this.headerBuffer = undefined;
                         if (this.connection == "Upgrade") {
                             this.upgrade = true;
                             this._finish();
+
+                            // TODO: Is this the most effective / extensible way here?
+                            break;
                         }
                     }
                 } else {
@@ -227,6 +245,7 @@ Host: ${request.url.hostname}\r
                 this._error(-1, "Bad content length " + contentLength);
                 return false;
             }
+            this.contentLength = len;
             event.contentLength = len;
         }
 
@@ -246,13 +265,15 @@ Host: ${request.url.hostname}\r
     }
 
     private _finish() {
-        if (this.onfinished)
+        if (this.onfinished) {
             this.onfinished();
+        }
     }
 
     private _error(code: number, message: string) {
-        if (this.onerror)
+        if (this.onerror) {
             this.onerror(code, message);
+        }
     }
 
     onheaders?: (headers: HTTPHeadersEvent) => void;

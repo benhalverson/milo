@@ -44,7 +44,7 @@ import {
 
 const maskBuf = new DataBuffer(MASK_SIZE);
 
-function generateMask(): IDataBuffer {
+export function generateMask(): IDataBuffer {
     maskBuf.setUInt8(0, Math.floor(Math.random() * 256));
     maskBuf.setUInt8(1, Math.floor(Math.random() * 256));
     maskBuf.setUInt8(2, Math.floor(Math.random() * 256));
@@ -57,7 +57,7 @@ export function constructFrameHeader(
     isFinished: boolean,
     opCode: number,
     payloadLength: number,
-    mask: boolean = true,
+    mask?: IDataBuffer,
 ): number {
     let ptr = 0;
 
@@ -100,16 +100,14 @@ export function constructFrameHeader(
     buf.setUInt8(1, secondByte);
 
     if (mask) {
-        buf.set(ptr, generateMask());
+        buf.set(ptr, mask);
         ptr += 4;
     }
 
     return ptr;
 }
 
-export function isHeaderParsable(state: WSState): boolean {
-    const packet = state.currentHeader;
-    const len = state.currentHeaderLen;
+export function isHeaderParsable(packet: IDataBuffer, len: number): boolean {
     if (len < 2) {
         return false;
     }
@@ -135,11 +133,9 @@ export function isHeaderParsable(state: WSState): boolean {
     return len >= size;
 }
 
-export function parseHeader(state: WSState): number {
-    const packet = state.currentHeader;
-
+export function parseHeader(header: IDataBuffer, state: WSState): number {
     let ptr = 0;
-    const byte1 = packet.getUInt8(ptr++);
+    const byte1 = header.getUInt8(ptr++);
     state.isFinished = (byte1 & (0x80)) >>> 7 === 1;
 
     state.rsv1 = (byte1 & 0x40) >> 6;
@@ -156,24 +152,24 @@ export function parseHeader(state: WSState): number {
         state.opcode = opcode;
     }
 
-    const byte2 = packet.getUInt8(ptr++);
+    const byte2 = header.getUInt8(ptr++);
 
     state.isMasked = (byte2 & 0x80) >>> 7 === 1;
 
     state.payloadLength =  (byte2 & 0x7F);
 
     if (state.payloadLength === 126) {
-        state.payloadLength = packet.getUInt16BE(ptr);
+        state.payloadLength = header.getUInt16BE(ptr);
         ptr += 2;
     }
 
     else if (state.payloadLength === 127) {
-        state.payloadLength = packet.getUInt32BE(ptr + 4);
+        state.payloadLength = header.getUInt32BE(ptr + 4);
         ptr += 8;
     }
 
     if (state.isMasked) {
-        state.currentMask.set(0, packet, ptr, MASK_SIZE);
+        state.currentMask.set(0, header, ptr, MASK_SIZE);
         ptr += 4;
     }
 

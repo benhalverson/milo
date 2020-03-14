@@ -1,7 +1,8 @@
-import WSFramer, { WSState } from './framer';
+import WSFramer from './framer';
+import { WSState } from './framer/types';
 import Platform from "../#{target}/Platform";
 import DataBuffer from "../#{target}/DataBuffer";
-import { Request, RequestData } from "../Request";
+import { Request, RequestData, RequestResponse } from "../Request";
 import { headerValue } from "../utils";
 
 import {
@@ -18,6 +19,7 @@ const defaultOptions = {
     maxFrameSize: 8192,
     poolInternals: false,
     noCopySentBuffers: false,
+    eventWrapper: true,
 } as WSOptions;
 
 const readView = new DataBuffer(16 * 1024);
@@ -58,7 +60,7 @@ function _wsUpgrade(u: string | UrlObject): Promise<NetworkPipe> {
         url = `ws://${url.host}:${url.port}`;
     }
 
-    const data: RequestData = { url };
+    const data: RequestData = { forbidReuse: true, url, format: "databuffer" };
 
     return new Promise((resolve, reject) => {
         if (!data.headers) {
@@ -95,6 +97,11 @@ function _wsUpgrade(u: string | UrlObject): Promise<NetworkPipe> {
                 throw new Error(`Key mismatch expected: ${shadkey} got: ${upgradeKeyResponse}`);
 
             Platform.trace("successfully upgraded");
+
+            debugger
+            // houstone we have a problem
+            // TODO: Come back to this...
+            // @ts-ignore
             resolve(req.networkPipe);
         }).catch(error => {
             Platform.trace("Got error", error);
@@ -134,6 +141,26 @@ export default class WS {
         this.connect(url);
     }
 
+    private readyEvent(msg: string | IDataBuffer, state?: WSState) {
+        if (typeof msg === 'string') {
+            return msg;
+        }
+
+        let payload: string | IDataBuffer = msg;
+        if (state && state.opcode === Opcodes.TextFrame) {
+            payload = Platform.utf8toa(msg);
+        }
+
+        // TODO: What other dumb things do I need to add to this?
+        if (this.opts.eventWrapper) {
+            return {
+                data: payload
+            };
+        }
+
+        return payload;
+    }
+
     private async connect(url: string | UrlObject) {
         const pipe = await _wsUpgrade(url)
         const {
@@ -164,7 +191,8 @@ export default class WS {
 
 
         // The pipe is ready to read.
-        pipe.ondata = () => {
+        const readData = () => {
+            debugger
             let bytesRead;
             while (1) {
 
@@ -175,7 +203,9 @@ export default class WS {
 
                 this.frame.processStreamData(readView, 0, bytesRead);
             }
-        };
+        }
+
+        pipe.ondata = readData;
 
         this.frame.onFrame((buffer: IDataBuffer, state: WSState) => {
             switch (state.opcode) {
@@ -197,10 +227,8 @@ export default class WS {
 
             case Opcodes.BinaryFrame:
             case Opcodes.TextFrame:
-                if (this.onmessage) {
-                    this.onmessage(buffer);
-                }
-                this.callCallback(message, this.onmessage, buffer);
+                const out = this.readyEvent(buffer, state);
+                this.callCallback(message, this.onmessage, out);
                 break;
 
             default:
@@ -209,6 +237,9 @@ export default class WS {
         });
 
         this.callCallback(open, this.onopen);
+
+        // reads any data that is still present in the pipe.
+        readData();
     }
 
     ping() {

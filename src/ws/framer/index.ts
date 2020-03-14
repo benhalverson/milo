@@ -1,10 +1,20 @@
 import Platform from '../../#{target}/Platform';
 import DataBuffer from '../../#{target}/DataBuffer'
 
+import { createDefaultState } from './state';
+
+import {
+    isHeaderParsable,
+    parseHeader,
+    constructFrameHeader,
+    generateMask,
+} from './header';
+
 import {
     FramerState,
     WSState,
     WSCallback,
+    MAX_HEADER_SIZE,
 } from './types';
 
 import {
@@ -35,8 +45,15 @@ export default class WSFramer {
     private controlState: WSState;
     private closed: boolean;
     private pipe: NetworkPipe;
+    private sendHeader: IDataBuffer;
+    private header: IDataBuffer;
+    private headerLen: number;
 
     constructor(pipe: NetworkPipe, maxFrameSize = 8096, maxPacketSize = 1024 * 1024 * 4) {
+        this.sendHeader = new DataBuffer(MAX_HEADER_SIZE);
+        this.header = new DataBuffer(MAX_HEADER_SIZE);
+        this.headerLen = 0;
+
         this.callbacks = [];
         this.pipe = pipe;
         this.maxFrameSize = maxFrameSize;
@@ -46,9 +63,12 @@ export default class WSFramer {
         this.closed = false;
     }
 
-    getActiveState() {
-        return this.controlState.state > this.msgState.state ?
-            this.controlState : this.msgState;
+    getActiveState(): WSState | null {
+        if (this.headerLen === 0) {
+            return null;
+        }
+
+        return this.isControlFrame() ? this.controlState : this.msgState;
     }
 
     onFrame(cb: WSCallback) {
@@ -69,8 +89,7 @@ export default class WSFramer {
         let ft = frameType;
         let count = 0;
 
-        const header = headerPool.malloc();
-        assert(header, "Gotta have header");
+        const header = this.sendHeader;
 
         header.setUInt8(0, 0);
 
@@ -89,8 +108,8 @@ export default class WSFramer {
             const fullBuf = new DataBuffer(headerEnd + frameSize);
 
             fullBuf.set(0, header);
-
             fullBuf.set(headerEnd, buf, ptr, frameSize);
+
             ptr += frameSize;
 
             maskFn(fullBuf, headerEnd, frameSize, mask);
@@ -103,29 +122,30 @@ export default class WSFramer {
             ptrLength += ptr - ptrStart;
 
         } while (ptrLength < length);
-
-        headerPool.free(header);
     }
 
-    /**
-     * Does some basic logic to check if the header is completed.
-     */
-    isHeaderComplete(packet: IDataBuffer, offset: number, length: number): boolean {
-        let ptr = offset;
-        throw new Error("Not Implemented");
-    }
-
-    isControlFrame(packet: IDataBuffer, offset: number): boolean {
-        const opCode = (packet.getUInt8(offset) & 0x0F);
+    isControlFrame(): boolean {
+        const opCode = (this.header.getUInt8(0) & 0x0F);
 
         return opCode === Opcodes.Ping ||
             opCode === Opcodes.Pong ||
             opCode === Opcodes.CloseConnection;
     }
 
+    fillInHeaderBuffer(packet: IDataBuffer, offset: number, endIdx: number) {
+        let ptr = this.headerLen;
+        const writeLen =
+            Math.min(endIdx - offset, this.header.byteLength - ptr);
+
+        this.header.set(ptr, packet, offset, writeLen);
+        this.headerLen += writeLen;
+    }
+
     // TODO: Handle Continuation.
     processStreamData(packet: IDataBuffer, offset: number, endIdx: number) {
 
+        // @ts-ignore
+          console.log("BUFFERS FROM WS", (packet).buffer);
         if (this.closed) {
             throw new Error("Hey, closed for business bud.");
         }
@@ -134,95 +154,80 @@ export default class WSFramer {
         let state = this.getActiveState();
 
         do {
-            if (state.state === State.Waiting ||
-                state.state === State.WaitingForCompleteHeader) {
+            if (state === null || state.state === FramerState.ParsingHeader) {
+                const startingLen = this.headerLen;
+
+                // Ensures that the packet has been filled in.
+                this.fillInHeaderBuffer(packet, offset, endIdx);
 
                 // First check to see if there is enough to parse
-                if (!this.isHeaderParsable(state, packet, offset, endIdx)) {
+                if (!isHeaderParsable(this.header, this.headerLen)) {
                     return false;
                 }
 
+                state = this.getActiveState();
+                assert(state, "There should be an active state once the header is parsed.");
 
-                // ITS GONNA DO IT.
-                if (state.state === State.Waiting &&
-                    this.isControlFrame(packet, ptr)) {
-                    state = this.controlState;
-                }
+                const parsedAmount = parseHeader(this.header, state);
+                ptr += parsedAmount - startingLen;
+                state.state = FramerState.ParsingBody;
 
-                let nextPtrOffset: number | boolean = 0;
-                if (state.state === State.Waiting) {
-                    nextPtrOffset = this.parseHeader(state, packet, ptr, endIdx);
-                }
+                Platform.log("Parsed Header", state);
 
-                else {
-                    // TODO: Stitching control frames???
-                    // CONFUSING, stitch the two headers together, and call it
-                    // a day.
-                    const headerBuf = headerPool.malloc();
-                    const payloadByteLength = state.payload.byteLength;
-
-                    assert(headerBuf, "Gotta have headerBuf");
-
-                    headerBuf.set(0, state.payload, 0, payloadByteLength);
-                        packet.subarray(ptr, headerBuf.byteLength - payloadByteLength),
-                        headerBuf.set(payloadByteLength, packet, ptr,
-                            headerBuf.byteLength - payloadByteLength);
-
-                    nextPtrOffset =
-                        this.parseHeader(state, headerBuf, 0, MAX_HEADER_SIZE);
-
-                    if (typeof nextPtrOffset === 'boolean') {
-                        throw new Error("WHAT JUST HAPPENED HERE, DEBUG ME PLEASE");
-                    }
-
-                    nextPtrOffset -= payloadByteLength;
-                    headerPool.free(headerBuf);
-                }
-
-                if (nextPtrOffset === false) {
-
-                    state.state = State.WaitingForCompleteHeader;
-                    state.payload = packet.slice(ptr, endIdx - ptr);
-
-                    break;
-                }
-
-                else {
-                    // @ts-ignore
-                    ptr = offset + nextPtrOffset;
-                }
+                // Re-evaluate the payload information.
+                // Try to finish frame if there is an empty header frame
+                // (close, ping, pong, no data);
+                this.tryFinishFrame(state);
+                continue;
             }
 
-            state.state = State.ParsingBody;
             const remainingPacket = state.payloadLength - state.payloadPtr;
             const subEndIdx = Math.min(ptr + remainingPacket, endIdx);
 
             ptr += this.parseBody(state, packet, ptr, subEndIdx);
+            this.tryFinishFrame(state);
 
-            const endOfPayload = state.payloadLength === state.payloadPtr;
-            if (state.isFinished && endOfPayload) {
-                state.isFinished = false;
-                state.state = State.Waiting;
+            // TODO: we about to go into contiuation mode, so get it baby!
+        } while (ptr < endIdx);
+    }
+
+    private tryFinishFrame(state: WSState | null) {
+        if (state === null) {
+            return;
+        }
+
+        const endOfPayload = state.payloadLength === state.payloadPtr;
+
+        if (endOfPayload) {
+            if (state.isFinished) {
                 this.pushFrame(state);
 
                 if (state.opcode === Opcodes.CloseConnection) {
                     this.closed = true;
                 }
-            }
-
-            // TODO: we about to go into contiuation mode, so get it baby!
-            else if (!state.isFinished && endOfPayload) {
-                if (!state.payloads)
-                    state.payloads = [];
+            } else  {
                 state.payloads.push(state.payload);
-                state.state = State.Waiting;
             }
 
-        } while (ptr < endIdx);
+            this.reset(state);
+        }
+    }
+
+    private reset(state: WSState): void {
+        this.headerLen = 0;
+
+        state.state = FramerState.ParsingHeader;
+        state.isMasked = false;
+
+        state.payloadLength = 0;
+        state.payloadPtr = 0;
+
+        if (state.isFinished) {
+            state.payloads.length = 0;
+        }
     }
 
     private getByteBetween(state: WSState, packet: IDataBuffer, offset: number, endIdx: number): number {
-
         return 0;
     }
 
@@ -240,9 +245,8 @@ export default class WSFramer {
         state.payload.set(state.payloadPtr, sub);
         const copyAmount = sub.byteLength;
 
-        debugger;
         if (state.isMasked) {
-            maskFn(state.payload, state.payloadPtr, copyAmount, state.mask);
+            maskFn(state.payload, state.payloadPtr, copyAmount, state.currentMask);
         }
 
         state.payloadPtr += copyAmount;
@@ -262,7 +266,6 @@ export default class WSFramer {
 
             // buf = Buffer.concat(state.payloads);
             buf = DataBuffer.concat(...state.payloads);
-            state.payloads = undefined;
         }
 
         this.callbacks.forEach(cb => cb(buf, state));

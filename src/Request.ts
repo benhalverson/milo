@@ -444,9 +444,13 @@ export class Request {
         this.requestResponse.timeToFirstByteWritten = this.http.timeToFirstByteWritten;
         this.requestResponse.timeToFirstByteRead = this.http.timeToFirstByteRead;
 
-        if (!(this.transferEncoding & HTTPTransferEncoding.Chunked))
+        if (!(this.transferEncoding & HTTPTransferEncoding.Chunked)) {
             this.requestData.onChunk = undefined;
+        }
+
         if (!this.requestData.onData && !this.requestData.onChunk) {
+            console.log("EventData", event.contentLength);
+
             if (typeof event.contentLength === "undefined") {
                 this.responseDataArray = [];
             } else if (event.contentLength && event.contentLength > 0) {

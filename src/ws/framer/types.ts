@@ -26,7 +26,7 @@ export type WSState = {
     payload: IDataBuffer;
     payloadLength: number;
     payloadPtr: number;
-    payloads?: IDataBuffer[];
+    payloads: IDataBuffer[];
 };
 
 export const MASK_SIZE = 4;

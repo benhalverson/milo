@@ -45,10 +45,12 @@ export class Pool<T> {
         this.boundFree = this.free.bind(this);
     }
 
-    get() {
+    get(): PoolItem<T> {
         if (this.pool.length === 0) {
             this.pool.push(this.factory(this.boundFree));
         }
+
+        // @ts-ignore
         return this.pool.pop();
     }
 
@@ -71,3 +73,4 @@ export function createDataBufferPool(size: number) {
     }
     return new Pool<IDataBuffer>(factory);
 }
+

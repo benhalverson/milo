@@ -23,9 +23,6 @@ export function createDefaultState(isControlFrame = false): WSState {
         isControlFrame,
         state: FramerState.ParsingHeader,
 
-        currentHeader: new DataBuffer(MAX_HEADER_SIZE),
-        currentHeaderLen: 0,
-
         //
         payloadLength: 0,
         payloadPtr: 0,
